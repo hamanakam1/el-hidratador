@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,8 @@ from .replay import replay, replay_all
 from .sandbox import DEFAULT_IMAGE, apply_sandbox, boundary_report, build_sandbox, teardown_sandbox
 from .schema import all_schemas, schema_files, schema_for, validate_named
 from .tickets import TicketStore
+
+FOLLOW_INTERVAL = 0.5
 
 
 def _emit(payload: dict[str, Any], pretty: bool = True) -> None:
@@ -142,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     events = sub.choices["events"]
     events.add_argument("--after", type=int, default=0)
+    events.add_argument(
+        "--follow",
+        action="store_true",
+        help="print new events as they are written, one JSON object per line",
+    )
 
     task_add = sub.add_parser("task-add", help="create a task")
     task_add.add_argument("id")
@@ -315,6 +323,12 @@ def run(argv: Sequence[str] | None = None) -> int:
 
         ledger = create_ledger(_db_path(args))
         try:
+            if command == "events" and args.follow:
+                try:
+                    follow_events(ledger, after=args.after)
+                except KeyboardInterrupt:
+                    return 130
+                return 0
             handler: Callable[[argparse.Namespace, Any], dict[str, Any]] = _HANDLERS[command]
             payload = handler(args, ledger)
             payload.setdefault("ok", True)
@@ -456,6 +470,34 @@ def _cmd_schema(args: argparse.Namespace, ledger: Ledger) -> dict[str, Any]:
     if args.name:
         return {"schema": args.name, "definition": schema_for(args.name)}
     return {"schemas": all_schemas(), "count": len(all_schemas())}
+
+
+def follow_events(
+    ledger: Ledger,
+    after: int = 0,
+    *,
+    emit: Callable[[str], None] = print,
+    sleep: Callable[[float], None] = time.sleep,
+    source: Callable[[int], list[dict[str, Any]]] | None = None,
+) -> None:
+    """Print new audit events as they arrive, one JSON object per line.
+
+    Following starts after the newest event already in the ledger, so a
+    freshly attached follower never repeats history. ``source`` exists so
+    tests can drive the loop without waiting on a real writer.
+    """
+    last = max(after, ledger.latest_event_seq())
+
+    def read(after: int) -> list[dict[str, Any]]:
+        if source is not None:
+            return source(after)
+        return ledger.events(after=after)
+
+    while True:
+        for event in read(last):
+            emit(json.dumps(event, sort_keys=True, default=str))
+            last = int(event["seq"])
+        sleep(FOLLOW_INTERVAL)
 
 
 def _cmd_task_add(args: argparse.Namespace, ledger: Ledger) -> dict[str, Any]:

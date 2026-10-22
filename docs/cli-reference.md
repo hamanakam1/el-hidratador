@@ -264,6 +264,7 @@ The append-only audit log.
 | Flag | Type | Default | Effect |
 |------|------|---------|--------|
 | `--after N` | int | `0` | Return only events with `seq > N`. Use it to page through the log. |
+| `--follow` | flag | off | Print new events as they are written, one JSON object per line, and exit on `SIGINT` with status 130. Following starts after the newest event already in the ledger, so it never repeats history. |
 
 ```bash
 hidratador events --after 8
@@ -276,6 +277,10 @@ hidratador events --after 8
   "events": [],
   "ok": true
 }
+```
+
+```bash
+hidratador events --follow | jq -c '{seq, type, task_id}'
 ```
 
 Each event is `{seq, type, task_id, data, created, created_iso}`. Event types: `task.created`,
