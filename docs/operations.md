@@ -349,6 +349,66 @@ hidratador start M-1001 --owner terminal-2 --lease 1800
 
 ---
 
+## Recovery drill: a task that will not move
+
+Use this when a task is stuck and the reason is not obvious from `hidratador status`. It is
+deliberately read-only until the last step, so a drill that is interrupted half way leaves the
+ledger exactly as it found it.
+
+### 1. Read the task
+
+```bash
+hidratador task-show M-1001 | jq '{status, owner, scope, token_budget}'
+```
+
+### 2. Read the sessions
+
+```bash
+hidratador status | jq '.sessions[] | select(.task_id == "M-1001") | {id, owner, status, tokens, lease_until}'
+```
+
+A session that is `active` with a `lease_until` in the past is a lease that nobody reconciled.
+A session that is `active` with a future `lease_until` is a worker that is still running — do not
+take the lease away from it.
+
+### 3. Read the failure history
+
+```bash
+hidratador status | jq '.failures[] | select(.category != null) | {category, summary, occurrences, last_seen}'
+```
+
+Repeated occurrences of the same fingerprint are an environment problem, not a worker problem.
+
+### 4. Read the event trail
+
+```bash
+hidratador events | jq -r '.events[] | select(.task_id == "M-1001") | "\(.seq)\t\(.type)"'
+```
+
+The last event before the stall usually names the cause: `session.started` with no
+`session.checkpoint` after it means the worker never reported progress.
+
+### 5. Decide, and only then act
+
+| What the trail shows | The action |
+|----------------------|------------|
+| An expired lease and no later activity | `hidratador decide M-1001 retry --reason "Reconciled the expired lease"` |
+| A budget failure | Raise the budget deliberately, then `decide retry` — the counter is not reset by a retry |
+| A `no_progress` failure | Change the approach or the context, then `decide retry` |
+| An active session with a future lease | Wait. Taking the lease from a live worker is how two workers end up in the same scope |
+
+### 6. Reconcile before you start again
+
+```bash
+hidratador reconcile
+hidratador start M-1001 --owner terminal-2 --lease 900
+```
+
+`reconcile` expires every lease that has run out. Running it first means the new session starts
+from a known state instead of inheriting a stale reservation.
+
+---
+
 ## Housekeeping notes
 
 | Item | Detail |
