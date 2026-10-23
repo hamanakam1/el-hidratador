@@ -485,6 +485,12 @@ hidratador task-update M-1001 --field tags --value security,auth
 Lifecycle fields are not settable here: `status` is refused, because a station changes through
 `start`, `checkpoint`, `fail`, `finish`, and `decide`.
 
+Scope keys cannot be added or removed while a ticket is `IN_PROGRESS`, `BLOCKED`, or `REVIEW`.
+These states hold a resource reservation. A refused scope update leaves every field in that
+update and the event log unchanged. Reordering the same keys and updating unrelated fields are
+allowed. Change the resource set before starting or after an explicit operator decision releases
+the reservation.
+
 ### `triage`
 
 Move a task from `INBOX` to `READY`. Refuses if the task is not in `INBOX` or has no scope.

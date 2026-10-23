@@ -96,6 +96,86 @@ class TaskLifecycleTests(LedgerTestCase):
         self.assertEqual(ticket["tags"], ["security"])
 
 
+class ScopeReservationTests(LedgerTestCase):
+    def reserve(self, task_id: str, status: str) -> list[str]:
+        scope = [f"repo/{task_id}/api", f"repo/{task_id}/web"]
+        self.make_task(task_id, scope=scope)
+        session = self.ledger.start(task_id, "terminal-1")
+        if status == "BLOCKED":
+            self.ledger.fail(session["session_id"], "tool", "tool unavailable")
+        elif status == "REVIEW":
+            self.ledger.checkpoint(session["session_id"], "summary", "evidence", "review", 10)
+            self.ledger.finish(session["session_id"], "review evidence")
+        return scope
+
+    def test_scope_changes_cannot_release_or_expand_a_reservation(self) -> None:
+        for index, status in enumerate(("IN_PROGRESS", "BLOCKED", "REVIEW")):
+            task_id = f"M-{1001 + index}"
+            scope = self.reserve(task_id, status)
+            for replacement in ([], ["repo/replacement"], [*scope, "repo/additional"]):
+                with self.subTest(status=status, replacement=replacement):
+                    before = self.ledger.task(task_id)
+                    events = self.ledger.events()
+                    with self.assertRaises(Conflict):
+                        self.ledger.update_task(task_id, title="changed", scope=replacement)
+                    self.assertEqual(self.ledger.task(task_id), before)
+                    self.assertEqual(self.ledger.events(), events)
+            contender = f"M-{2001 + index}"
+            self.make_task(contender, scope=scope)
+            with self.assertRaises(Conflict):
+                self.ledger.start(contender, "terminal-2")
+
+    def test_equivalent_scope_updates_preserve_reservations(self) -> None:
+        for index, status in enumerate(("IN_PROGRESS", "BLOCKED", "REVIEW")):
+            with self.subTest(status=status):
+                task_id = f"M-{1001 + index}"
+                scope = self.reserve(task_id, status)
+                ticket = self.ledger.update_task(
+                    task_id,
+                    scope=(scope[1], scope[0], scope[0]),
+                    owner="terminal-2",
+                    tags=["reviewed"],
+                )
+                self.assertEqual(set(ticket["scope"]), set(scope))
+                self.assertEqual(ticket["owner"], "terminal-2")
+                self.assertEqual(ticket["tags"], ["reviewed"])
+                self.assertEqual(ticket["status"], status)
+                self.assertEqual(self.ledger.events()[-1]["type"], "task.updated")
+
+    def test_other_fields_can_change_while_scope_is_reserved(self) -> None:
+        scope = self.reserve("M-1001", "IN_PROGRESS")
+        ticket = self.ledger.update_task("M-1001", description="clarified description")
+        self.assertEqual(ticket["description"], "clarified description")
+        self.assertEqual(ticket["scope"], scope)
+        self.assertEqual(ticket["status"], "IN_PROGRESS")
+
+    def test_scope_can_change_before_start(self) -> None:
+        for index, status in enumerate(("INBOX", "READY")):
+            with self.subTest(status=status):
+                task_id = f"M-{1001 + index}"
+                self.make_task(task_id)
+                if status == "READY":
+                    self.ledger.triage(task_id)
+                scope = [f"repo/{task_id}/updated"]
+                self.ledger.update_task(task_id, scope=scope)
+                self.ledger.start(task_id, "terminal-1")
+                self.assertEqual(self.ledger.task(task_id)["scope"], scope)
+
+    def test_scope_can_change_after_explicit_operator_release(self) -> None:
+        for index, decision in enumerate(("retry", "cancel", "accept")):
+            with self.subTest(decision=decision):
+                task_id = f"M-{1001 + index}"
+                original_scope = self.reserve(task_id, "REVIEW")
+                self.ledger.decide(task_id, decision, "operator reviewed the reservation")
+                scope = [f"repo/{task_id}/updated"]
+                self.ledger.update_task(task_id, scope=scope)
+                self.assertEqual(self.ledger.task(task_id)["scope"], scope)
+                contender = f"M-{2001 + index}"
+                self.make_task(contender, scope=original_scope)
+                self.ledger.start(contender, "terminal-2")
+                self.assertEqual(self.ledger.task(contender)["status"], "IN_PROGRESS")
+
+
 class SessionAndLeaseTests(LedgerTestCase):
     def test_start_acquires_lease_and_moves_to_in_progress(self) -> None:
         self.make_task()

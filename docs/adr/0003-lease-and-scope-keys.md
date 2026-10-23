@@ -31,8 +31,9 @@ mutating command runs `reconcile()` first, so no daemon has to watch the clock.
   that touches the ledger notices the dead worker on its own.
 - The reservation is legible. `SELECT id, scope FROM tickets WHERE status IN (...)` answers
   "who holds this resource" without any project-specific tooling.
-- The exclusion is enforced in one place — `Ledger.start()` — rather than spread across the
-  workers that happen to touch a resource.
+- `Ledger.start()` checks for overlapping reservations, and `Ledger.update_task()` prevents a
+  ticket from changing its reserved resource set while in `IN_PROGRESS`, `BLOCKED`, or `REVIEW`.
+  Workers cannot release a reservation by editing the ticket's scope.
 - Scope keys make the operator's intent explicit and reviewable. A ticket that says it touches
   `repo/api` is a claim that can be checked against what the ticket actually did.
 - A partial unique index on `sessions(task_id) WHERE status = 'active'` means the database itself

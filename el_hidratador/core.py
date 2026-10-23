@@ -718,7 +718,11 @@ class Ledger:
         return {"task_id": task_id, "created": True, "idempotent": False}
 
     def update_task(self, task_id: str, **fields: Any) -> dict[str, Any]:
-        """Update mutable ticket fields. Lifecycle fields are not settable here."""
+        """Update ticket fields without changing a held scope reservation.
+
+        Lifecycle fields are not settable here. Scope keys remain fixed while
+        a task is in progress, blocked, or awaiting review.
+        """
         allowed = {
             "title",
             "objective",
@@ -738,7 +742,7 @@ class Ledger:
         if unknown:
             raise ValidationError(f"cannot update field(s): {', '.join(sorted(unknown))}")
         with self.transaction():
-            self.get_ticket(task_id)
+            ticket = self.get_ticket(task_id)
             assignments: list[str] = []
             values: list[Any] = []
             for key, value in fields.items():
@@ -746,7 +750,22 @@ class Ledger:
                     raise ValidationError(f"invalid column name: {key}")
                 assignments.append(f"{key}=?")
                 if key in ("scope", "tags", "depends_on", "blocks", "acceptance_criteria"):
-                    values.append(json.dumps([str(item) for item in value]))
+                    items = [str(item) for item in value]
+                    if (
+                        key == "scope"
+                        and ticket.status
+                        in (
+                            TicketStatus.IN_PROGRESS.value,
+                            TicketStatus.BLOCKED.value,
+                            TicketStatus.REVIEW.value,
+                        )
+                        and set(items) != set(ticket.scope)
+                    ):
+                        raise Conflict(
+                            f"cannot change scope while task is {ticket.status}; "
+                            "release the reservation through an operator decision first"
+                        )
+                    values.append(json.dumps(items))
                 else:
                     values.append(value)
             if assignments:
