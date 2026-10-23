@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Replay reads the complete task history in one read snapshot and never reconciles expired leases.
+  The CLI opens an existing ledger read-only, refusing missing or outdated databases without
+  initializing, migrating, or changing their permissions.
 - Ticket creation and updates validate required text, kind, scope, budget, priority, and collection
   types before writing. Invalid updates cannot erase scope or bypass the cumulative token budget,
   and refusals preserve the ticket and audit history.

@@ -397,8 +397,42 @@ class Ledger:
     handoffs, and the GitHub observation/outbox tables.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path = Path(path).expanduser()
+        self._read_only = read_only
+        if read_only:
+            if not self.path.is_file():
+                raise NotFound(f"ledger does not exist: {self.path}")
+            try:
+                self.db = sqlite3.connect(
+                    self.path.resolve().as_uri() + "?mode=ro",
+                    uri=True,
+                    timeout=10,
+                    isolation_level=None,
+                )
+                self.db.row_factory = sqlite3.Row
+                version = self.schema_version
+                if version != SCHEMA_VERSION:
+                    raise ValidationError(
+                        "read-only access requires the current ledger schema; "
+                        + (
+                            "use an explicit init operation to migrate an older ledger"
+                            if version < SCHEMA_VERSION
+                            else "use software compatible with this newer ledger"
+                        )
+                    )
+            except ValidationError:
+                self.db.close()
+                raise
+            except (sqlite3.Error, ValueError) as exc:
+                if hasattr(self, "db"):
+                    self.db.close()
+                raise ValidationError("could not read an existing ledger database") from exc
+            except BaseException:
+                if hasattr(self, "db"):
+                    self.db.close()
+                raise
+            return
         if self.path.parent and str(self.path.parent) not in ("", "."):
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(str(self.path), timeout=10, isolation_level=None)
@@ -609,6 +643,8 @@ class Ledger:
     @contextmanager
     def transaction(self) -> Iterator[None]:
         """Run a block inside an immediate (write-locking) transaction."""
+        if self._read_only:
+            raise ValidationError("read-only ledger does not permit mutations")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             yield

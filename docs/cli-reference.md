@@ -318,6 +318,16 @@ hidratador replay --all
 When the event log and the ticket table disagree, `consistent` is `false` and `divergences` names
 the difference. Replay never writes to the ledger.
 
+Replay reads the complete history for each task, including events beyond the first 500 global
+events, and compares history, checkpoints, and recorded state within one read snapshot. Expired
+leases remain as recorded; use an explicit `reconcile` operation to update them. `replay --all`
+uses one snapshot for the whole report, even if another writer commits during the read.
+
+The CLI opens the ledger read-only. A missing database or a schema that requires migration is a
+typed refusal with exit code `2`; replay never creates or migrates a database. Use an explicit
+`init` operation when initialization or migration is intended.
+If the ledger was written by a newer schema version, use compatible software instead.
+
 ### `failures`
 
 List the recorded failures, grouped by fingerprint.

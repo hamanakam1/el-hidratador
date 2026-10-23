@@ -5,10 +5,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from el_hidratador.core import create_ledger
 from el_hidratador.demo import demo_text, run_demo
 from el_hidratador.doctor import run_checks
+from el_hidratador.errors import NotFound
 from el_hidratador.replay import reconstruct, replay, replay_all
 
 
@@ -76,6 +78,155 @@ class ReplayTests(unittest.TestCase):
         replay(self.ledger, "M-1001")
         after = self.ledger.db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         self.assertEqual(before, after)
+
+    def _expired_session(self) -> str:
+        with patch("time.time", return_value=100):
+            self.ledger.add_task("M-1002", "objective", "acceptance", scope=["repo/expired"])
+            return self.ledger.start("M-1002", "terminal-2", lease_seconds=1)["session_id"]
+
+    def test_replay_does_not_reconcile_an_expired_task(self) -> None:
+        session = self._expired_session()
+        before = list(self.ledger.db.iterdump())
+        changes = self.ledger.db.total_changes
+        with patch("time.time", return_value=102):
+            result = replay(self.ledger, "M-1002")
+        self.assertEqual(result["current_station"], "IN_PROGRESS")
+        self.assertTrue(result["consistent"])
+        self.assertEqual(self.ledger.session(session)["status"], "active")
+        self.assertEqual(list(self.ledger.db.iterdump()), before)
+        self.assertEqual(self.ledger.db.total_changes, changes)
+        self.assertFalse(self.ledger.db.in_transaction)
+
+    def test_replay_does_not_reconcile_an_unrelated_expired_task(self) -> None:
+        self._lifecycle()
+        self._expired_session()
+        before = list(self.ledger.db.iterdump())
+        changes = self.ledger.db.total_changes
+        with patch("time.time", return_value=102):
+            result = replay(self.ledger, "M-1001")
+        self.assertTrue(result["consistent"])
+        self.assertEqual(result["current_station"], "DONE")
+        self.assertEqual(list(self.ledger.db.iterdump()), before)
+        self.assertEqual(self.ledger.db.total_changes, changes)
+
+    def test_replay_all_does_not_reconcile_expired_tasks(self) -> None:
+        self._lifecycle()
+        self._expired_session()
+        before = list(self.ledger.db.iterdump())
+        changes = self.ledger.db.total_changes
+        with patch("time.time", return_value=102):
+            result = replay_all(self.ledger)
+        self.assertEqual(result["inconsistent"], [])
+        self.assertEqual(list(self.ledger.db.iterdump()), before)
+        self.assertEqual(self.ledger.db.total_changes, changes)
+
+    def test_replay_finds_tasks_created_after_the_first_500_events(self) -> None:
+        self.ledger.add_task("M-1001", "objective", "acceptance")
+        for index in range(501):
+            self.ledger.update_task("M-1001", title=f"revision {index}")
+        self.ledger.add_task("M-1002", "objective", "acceptance")
+        self.ledger.triage("M-1002")
+        result = replay(self.ledger, "M-1002")
+        self.assertEqual(result["event_count"], 2)
+        self.assertEqual(result["reconstructed_station"], "READY")
+        self.assertTrue(result["consistent"])
+        self.assertGreater(result["steps"][0]["seq"], 500)
+
+    def test_replay_includes_a_tasks_complete_history_beyond_500_events(self) -> None:
+        self.ledger.add_task("M-1001", "objective", "acceptance")
+        for index in range(501):
+            self.ledger.update_task("M-1001", title=f"revision {index}")
+        session = self.ledger.start("M-1001", "terminal-1")
+        self.ledger.checkpoint(session["session_id"], "summary", "evidence", "next", 10)
+        self.ledger.finish(session["session_id"], "evidence")
+        self.ledger.decide("M-1001", "accept", "reviewed")
+        result = replay(self.ledger, "M-1001")
+        sequences = [
+            row["seq"]
+            for row in self.ledger.db.execute(
+                "SELECT seq FROM events WHERE task_id=? ORDER BY seq", ("M-1001",)
+            )
+        ]
+        self.assertEqual([step["seq"] for step in result["steps"]], sequences)
+        self.assertEqual(result["event_count"], len(sequences))
+        self.assertEqual(result["reconstructed_station"], "DONE")
+        self.assertTrue(result["consistent"])
+
+    def test_replay_preserves_an_existing_caller_transaction(self) -> None:
+        self._lifecycle()
+        original_title = self.ledger.task("M-1001")["title"]
+        for all_tasks in (False, True):
+            with self.subTest(all_tasks=all_tasks):
+                self.ledger.db.execute("BEGIN")
+                try:
+                    self.ledger.db.execute(
+                        "UPDATE tickets SET title=? WHERE id=?", ("pending change", "M-1001")
+                    )
+                    changes = self.ledger.db.total_changes
+                    if all_tasks:
+                        replay_all(self.ledger)
+                    else:
+                        replay(self.ledger, "M-1001")
+                    self.assertTrue(self.ledger.db.in_transaction)
+                    self.assertEqual(self.ledger.task("M-1001")["title"], "pending change")
+                    self.assertEqual(self.ledger.db.total_changes, changes)
+                finally:
+                    self.ledger.db.rollback()
+                self.assertEqual(self.ledger.task("M-1001")["title"], original_title)
+
+    def test_missing_task_refusal_preserves_transaction_ownership(self) -> None:
+        self._lifecycle()
+        with self.assertRaises(NotFound):
+            replay(self.ledger, "M-404")
+        self.assertFalse(self.ledger.db.in_transaction)
+        self.ledger.db.execute("BEGIN")
+        try:
+            self.ledger.db.execute(
+                "UPDATE tickets SET title=? WHERE id=?", ("pending change", "M-1001")
+            )
+            with self.assertRaises(NotFound):
+                replay(self.ledger, "M-404")
+            self.assertTrue(self.ledger.db.in_transaction)
+            self.assertEqual(self.ledger.task("M-1001")["title"], "pending change")
+        finally:
+            self.ledger.db.rollback()
+
+    def test_replay_keeps_one_snapshot_when_a_writer_commits(self) -> None:
+        self.ledger.add_task("M-1001", "objective", "acceptance")
+        original_task = self.ledger.task
+        with create_ledger(self.ledger.path) as writer:
+            writer.db.execute("PRAGMA busy_timeout=100")
+
+            def read_then_write(task_id: str) -> dict:
+                task = original_task(task_id)
+                writer.triage(task_id)
+                return task
+
+            with patch.object(self.ledger, "task", side_effect=read_then_write):
+                result = replay(self.ledger, "M-1001")
+        self.assertEqual(result["current_station"], "INBOX")
+        self.assertEqual(result["reconstructed_station"], "INBOX")
+        self.assertTrue(result["consistent"])
+        self.assertEqual(self.ledger.task("M-1001")["status"], "READY")
+
+    def test_replay_all_keeps_one_snapshot_across_tasks(self) -> None:
+        self.ledger.add_task("M-1001", "objective", "acceptance")
+        self.ledger.add_task("M-1002", "objective", "acceptance")
+        original_task = self.ledger.task
+        with create_ledger(self.ledger.path) as writer:
+            writer.db.execute("PRAGMA busy_timeout=100")
+
+            def read_then_write(task_id: str) -> dict:
+                task = original_task(task_id)
+                if task_id == "M-1001":
+                    writer.triage("M-1002")
+                return task
+
+            with patch.object(self.ledger, "task", side_effect=read_then_write):
+                result = replay_all(self.ledger)
+        self.assertEqual([task["current_station"] for task in result["tasks"]], ["INBOX", "INBOX"])
+        self.assertEqual(result["inconsistent"], [])
+        self.assertEqual(self.ledger.task("M-1002")["status"], "READY")
 
     def test_replay_all_covers_every_task(self) -> None:
         self._lifecycle()

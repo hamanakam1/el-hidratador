@@ -313,7 +313,11 @@ def run(argv: Sequence[str] | None = None) -> int:
             _emit(payload, pretty)
             return 2 if command == "schema" and payload.get("valid") is False else 0
 
-        ledger = create_ledger(_db_path(args))
+        ledger = (
+            Ledger(_db_path(args), read_only=True)
+            if command == "replay"
+            else create_ledger(_db_path(args))
+        )
         try:
             handler: Callable[[argparse.Namespace, Any], dict[str, Any]] = _HANDLERS[command]
             payload = handler(args, ledger)

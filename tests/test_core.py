@@ -8,7 +8,7 @@ import time
 import unittest
 from pathlib import Path
 
-from el_hidratador.core import create_ledger
+from el_hidratador.core import Ledger, create_ledger
 from el_hidratador.errors import (
     BudgetExceeded,
     Conflict,
@@ -39,6 +39,53 @@ class LedgerTestCase(unittest.TestCase):
         }
         kwargs.update(overrides)
         return self.ledger.add_task(**kwargs)
+
+
+class ReadOnlyLedgerTests(LedgerTestCase):
+    def test_readonly_ledger_reads_committed_wal_without_changing_permissions(self) -> None:
+        self.make_task()
+        self.path.chmod(0o640)
+        with Ledger(self.path, read_only=True) as reader:
+            self.assertEqual(reader.task("M-1001")["objective"], "Implement the thing")
+            self.assertEqual(reader.db.total_changes, 0)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o640)
+
+    def test_readonly_ledger_refuses_public_mutations(self) -> None:
+        self.make_task()
+        before = self.ledger.events()
+        with Ledger(self.path, read_only=True) as reader:
+            with self.assertRaises(ValidationError):
+                reader.update_task("M-1001", title="changed")
+            self.assertEqual(reader.db.total_changes, 0)
+            self.assertFalse(reader.db.in_transaction)
+        self.assertEqual(self.ledger.events(), before)
+
+    def test_readonly_ledger_never_creates_a_missing_path(self) -> None:
+        missing = Path(self.tmp.name) / "missing-parent" / "ledger.sqlite"
+        with self.assertRaises(NotFound):
+            Ledger(missing, read_only=True)
+        self.assertFalse(missing.parent.exists())
+
+    def test_readonly_ledger_refuses_schema_migration_without_changing_version(self) -> None:
+        self.ledger.db.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
+        before = self.ledger.db.total_changes
+        with self.assertRaisesRegex(ValidationError, "explicit init"):
+            Ledger(self.path, read_only=True)
+        self.assertEqual(self.ledger.schema_version, 2)
+        self.assertEqual(self.ledger.db.total_changes, before)
+
+    def test_readonly_ledger_refuses_newer_schema_without_suggesting_downgrade(self) -> None:
+        self.ledger.db.execute("UPDATE meta SET value='999' WHERE key='schema_version'")
+        with self.assertRaisesRegex(ValidationError, "compatible with this newer ledger"):
+            Ledger(self.path, read_only=True)
+        self.assertEqual(self.ledger.schema_version, 999)
+
+    def test_readonly_ledger_refuses_non_database_files(self) -> None:
+        path = Path(self.tmp.name) / "not-a-ledger.sqlite"
+        path.write_bytes(b"synthetic document, not a ledger")
+        with self.assertRaises(ValidationError):
+            Ledger(path, read_only=True)
+        self.assertEqual(path.read_bytes(), b"synthetic document, not a ledger")
 
 
 class TaskLifecycleTests(LedgerTestCase):

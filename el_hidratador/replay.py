@@ -14,6 +14,9 @@ Replay is read-only. It never writes to the ledger.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from .core import Ledger, TicketStatus
@@ -92,10 +95,28 @@ def _detail(kind: str, data: dict[str, Any]) -> str:
     return ""
 
 
-def replay(ledger: Ledger, task_id: str) -> dict[str, Any]:
-    """Replay one task and compare the reconstruction with the current state."""
+@contextmanager
+def _read_snapshot(ledger: Ledger) -> Iterator[None]:
+    """Keep reads consistent without taking a write lock or ending a caller transaction."""
+    ledger.db.execute("SAVEPOINT hidratador_replay")
+    try:
+        yield
+    except BaseException:
+        ledger.db.execute("ROLLBACK TO hidratador_replay")
+        raise
+    finally:
+        ledger.db.execute("RELEASE hidratador_replay")
+
+
+def _replay_task(ledger: Ledger, task_id: str) -> dict[str, Any]:
+    """Read one task's complete history within the caller's snapshot."""
     task = ledger.task(task_id)
-    events = [event for event in ledger.events() if event.get("task_id") == task_id]
+    events = [
+        {"seq": row["seq"], "type": row["type"], "data": json.loads(row["data"])}
+        for row in ledger.db.execute(
+            "SELECT seq,type,data FROM events WHERE task_id=? ORDER BY seq", (task_id,)
+        ).fetchall()
+    ]
     reconstruction = reconstruct(events)
     current = task["status"]
 
@@ -121,8 +142,9 @@ def replay(ledger: Ledger, task_id: str) -> dict[str, Any]:
 
     checkpoints = [
         checkpoint
-        for session in ledger.status()["sessions"]
-        if session["task_id"] == task_id
+        for session in ledger.db.execute(
+            "SELECT id FROM sessions WHERE task_id=? ORDER BY created", (task_id,)
+        ).fetchall()
         for checkpoint in ledger.checkpoints(session["id"])
     ]
 
@@ -140,9 +162,16 @@ def replay(ledger: Ledger, task_id: str) -> dict[str, Any]:
     }
 
 
+def replay(ledger: Ledger, task_id: str) -> dict[str, Any]:
+    """Replay a task's complete history and recorded state from one read-only snapshot."""
+    with _read_snapshot(ledger):
+        return _replay_task(ledger, task_id)
+
+
 def replay_all(ledger: Ledger) -> dict[str, Any]:
-    """Replay every task in the ledger."""
-    reports = [replay(ledger, task["id"]) for task in ledger.tasks()]
+    """Replay every task using one read-only snapshot for the whole report."""
+    with _read_snapshot(ledger):
+        reports = [_replay_task(ledger, task["id"]) for task in ledger.tasks()]
     inconsistent = [report["task_id"] for report in reports if not report["consistent"]]
     return {
         "tasks": reports,

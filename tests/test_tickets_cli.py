@@ -368,6 +368,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertFalse(payload["ok"])
 
+    def test_replay_missing_ledger_is_not_initialized(self) -> None:
+        for arguments in (("replay", "M-1001"), ("replay", "--all")):
+            with self.subTest(arguments=arguments):
+                code, payload = self._run(*arguments)
+                self.assertEqual(code, 2)
+                self.assertEqual(payload["kind"], "NotFound")
+                self.assertFalse(Path(self.db).exists())
+
     def test_replay_reconstructs_a_lifecycle(self) -> None:
         self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
         self._run("triage", "M-1001")
