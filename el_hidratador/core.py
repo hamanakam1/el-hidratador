@@ -577,6 +577,11 @@ class Ledger:
             (_type, _task_id, json.dumps(data, sort_keys=True, default=str), time.time()),
         )
 
+    def latest_event_seq(self) -> int:
+        """Return the highest event sequence number, or 0 when the log is empty."""
+        row = self.db.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").fetchone()
+        return int(row["seq"])
+
     def events(self, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
         """Return audit events with a sequence number greater than ``after``."""
         rows = self.db.execute(

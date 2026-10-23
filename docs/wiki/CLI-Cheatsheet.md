@@ -7,7 +7,7 @@ Global flags: `--db PATH`, `--compact`, `--version`.
 | `init` | Create the ledger |
 | `status` | Snapshot of tasks, sessions, failures, and metrics |
 | `reconcile` | Expire stale leases and report what changed |
-| `events [--after N]` | Read the audit log |
+| `events [--after N] [--follow]` | Read the audit log, or follow new events |
 | `task-add ID ...` | Create a task (idempotent with `--seed-key`) |
 | `task-show ID` | One task as JSON |
 | `task-list [--status S]` | List tasks |
