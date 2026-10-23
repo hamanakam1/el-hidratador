@@ -10,7 +10,7 @@ The validator supports the subset of JSON Schema these schemas use:
 * ``type`` (including a list of types)
 * ``properties``, ``required``, ``additionalProperties``
 * ``items``
-* ``enum``
+* ``const``, ``enum``
 * ``minimum``, ``maximum``, ``exclusiveMinimum``, ``exclusiveMaximum``
 * ``minLength``, ``maxLength``, ``minItems``, ``maxItems``
 * ``pattern``
@@ -24,6 +24,7 @@ suite asserts that the schemas and the validator agree.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -289,14 +290,57 @@ def _type_of(value: Any) -> str:
     return "unknown"
 
 
+def _json_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's boolean/number equivalence."""
+    left_type, right_type = _type_of(left), _type_of(right)
+    if left_type in {"integer", "number"} and right_type in {"integer", "number"}:
+        return bool(left == right)
+    if left_type != right_type:
+        return False
+    if left_type == "array":
+        return len(left) == len(right) and all(
+            _json_equal(first, second) for first, second in zip(left, right, strict=True)
+        )
+    if left_type == "object":
+        return left.keys() == right.keys() and all(
+            _json_equal(value, right[name]) for name, value in left.items()
+        )
+    if left_type in {"null", "boolean", "string"}:
+        return bool(left == right)
+    return False
+
+
+def _nonfinite_errors(instance: Any, path: str = "$") -> list[str]:
+    """Check every value, including fields the schema leaves unrestricted."""
+    if isinstance(instance, float) and not math.isfinite(instance):
+        return [f"{path}: JSON numbers must be finite"]
+    errors: list[str] = []
+    if isinstance(instance, list):
+        for index, item in enumerate(instance):
+            errors.extend(_nonfinite_errors(item, f"{path}[{index}]"))
+    elif isinstance(instance, dict):
+        for name, value in instance.items():
+            errors.extend(_nonfinite_errors(value, f"{path}.{name}"))
+    return errors
+
+
 def validate(
     instance: Any, schema: dict[str, Any], root: dict[str, Any] | None = None
 ) -> list[str]:
     """Validate ``instance`` against ``schema`` and return a list of errors.
 
-    An empty list means the instance satisfies the schema.
+    An empty list means the instance satisfies the schema. Non-finite numbers
+    are refused even in fields that have no schema constraints.
     """
+    errors = _nonfinite_errors(instance)
+    if errors:
+        return errors
     root = schema if root is None else root
+    return _validate(instance, schema, root)
+
+
+def _validate(instance: Any, schema: dict[str, Any], root: dict[str, Any]) -> list[str]:
+    """Apply schema keywords after the complete instance passed the JSON check."""
     schema = _resolve(schema, root)
     errors: list[str] = []
     path = "$"
@@ -308,17 +352,17 @@ def validate(
             errors.append(f"{path}: expected type {' or '.join(types)}, got {_type_of(instance)}")
             return errors
 
-    if "const" in schema and instance != schema["const"]:
+    if "const" in schema and not _json_equal(instance, schema["const"]):
         errors.append(f"{path}: expected the constant {schema['const']!r}, got {instance!r}")
 
-    if "enum" in schema and instance not in schema["enum"]:
+    if "enum" in schema and not any(_json_equal(instance, value) for value in schema["enum"]):
         errors.append(f"{path}: {instance!r} is not one of {schema['enum']!r}")
 
     def _any_of() -> bool:
-        return any(not validate(instance, option, root) for option in schema["anyOf"])
+        return any(not _validate(instance, option, root) for option in schema["anyOf"])
 
     def _one_of() -> bool:
-        matched = sum(1 for option in schema["oneOf"] if not validate(instance, option, root))
+        matched = sum(1 for option in schema["oneOf"] if not _validate(instance, option, root))
         return matched == 1
 
     for keyword, ok, message in (
@@ -355,10 +399,8 @@ def validate(
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(instance):
-                errors.extend(validate(item, item_schema, root))
-                for error in errors[-1:]:
-                    if error.startswith("$:"):
-                        errors[-1] = f"$[{index}]{error[1:]}"
+                for error in _validate(item, item_schema, root):
+                    errors.append(f"{path}[{index}]{error[1:]}" if error.startswith("$") else error)
 
     if isinstance(instance, dict):
         for name in schema.get("required", []):
@@ -367,13 +409,13 @@ def validate(
         properties = schema.get("properties", {})
         for name, value in instance.items():
             if name in properties:
-                sub = validate(value, properties[name], root)
+                sub = _validate(value, properties[name], root)
                 for error in sub:
                     errors.append(f"{path}.{name}{error[1:]}" if error.startswith("$") else error)
             elif schema.get("additionalProperties") is False:
                 errors.append(f"{path}: the property {name!r} is not allowed")
             elif isinstance(schema.get("additionalProperties"), dict):
-                sub = validate(value, schema["additionalProperties"], root)
+                sub = _validate(value, schema["additionalProperties"], root)
                 for error in sub:
                     errors.append(f"{path}.{name}{error[1:]}" if error.startswith("$") else error)
 
