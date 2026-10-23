@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import time
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -147,7 +149,8 @@ def build_packet(
     """Expand a ticket plus context into a hydrated packet.
 
     Returns the packet, the rendered prompt, the byte size of both, and an
-    explicit list of anything that did not fit.
+    explicit list of anything expired or unable to fit. Expiration is checked
+    against one timestamp for the packet, without deleting stored context.
     """
     if not isinstance(ticket, dict):
         raise ValidationError("ticket must be a mapping")
@@ -186,12 +189,24 @@ def build_packet(
             "mandatory ticket structure does not fit max_bytes; increase the budget or shorten the ticket"
         )
 
+    now = time.time()
     for entry in context_entries:
         candidate = {
             "hash": entry.get("hash") or sha256(entry.get("body", "")),
             "source": entry.get("source", "unknown"),
             "body": entry.get("body", ""),
         }
+        expires = entry.get("expires")
+        if expires is not None:
+            if type(expires) not in (int, float) or (
+                isinstance(expires, float) and not math.isfinite(expires)
+            ):
+                raise ValidationError("context expires must be a finite timestamp or null")
+            if expires <= now:
+                omitted.append(
+                    {"hash": candidate["hash"], "source": candidate["source"], "reason": "expired"}
+                )
+                continue
         packet["context"].append(candidate)
         if size() > max_bytes:
             packet["context"].pop()

@@ -202,6 +202,11 @@ The prompt grows as context is added, so `expand` is the stricter of the two. Us
 prompt is what will actually be handed to a worker; use `pack` when only the structured packet
 matters.
 
+Expansion checks expiration once per packet. An attachment whose `expires` timestamp is at or
+before that instant is omitted from both the packet and its rendered prompt, with reason
+`expired`. A missing or null expiration remains eligible for inclusion. Invalid timestamps
+raise `ValidationError`. Expansion does not delete attachments or change ledger events.
+
 ### How omission is reported
 
 Both return an `omitted` list. Each entry has exactly three keys:

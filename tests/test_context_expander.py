@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from el_hidratador.context_expander import (
     build_packet,
     dedupe_context,
     estimate_tokens,
+    expand_from_ledger,
     render_prompt,
     split_budget,
     summarize_packet,
 )
+from el_hidratador.core import Ledger
 from el_hidratador.errors import ValidationError
 
 
@@ -42,6 +45,63 @@ class EstimateTests(unittest.TestCase):
 
 
 class PacketTests(unittest.TestCase):
+    def test_expired_context_is_omitted_from_packet_and_prompt_at_the_boundary(self) -> None:
+        entries = [
+            {"body": "expired reference", "source": "old", "expires": 99},
+            {"body": "boundary reference", "source": "boundary", "expires": 100},
+            {"body": "current reference", "source": "current", "expires": 101},
+            {"body": "permanent reference", "source": "permanent", "expires": None},
+            {"body": "undated reference", "source": "undated"},
+        ]
+        with patch("time.time", return_value=100):
+            result = build_packet(sample_ticket(), entries)
+        self.assertEqual(
+            [entry["source"] for entry in result["packet"]["context"]],
+            ["current", "permanent", "undated"],
+        )
+        self.assertEqual([item["source"] for item in result["omitted"]], ["old", "boundary"])
+        for item in result["omitted"]:
+            self.assertEqual(set(item), {"hash", "source", "reason"})
+            self.assertEqual(item["reason"], "expired")
+        self.assertNotIn("expired reference", result["prompt"])
+        self.assertNotIn("boundary reference", result["prompt"])
+
+    def test_expired_context_is_reported_as_expired_even_when_over_budget(self) -> None:
+        with patch("time.time", return_value=100):
+            result = build_packet(
+                sample_ticket(), [{"body": "old" * 10000, "source": "old", "expires": 0}]
+            )
+        self.assertEqual(result["omitted"][0]["reason"], "expired")
+        self.assertEqual(result["packet"]["context"], [])
+
+    def test_invalid_expiration_is_a_typed_refusal(self) -> None:
+        for expires in (True, "yesterday", [], float("nan"), float("inf"), -float("inf")):
+            with self.subTest(expires=expires), self.assertRaises(ValidationError):
+                build_packet(sample_ticket(), [{"body": "reference", "expires": expires}])
+
+    def test_ledger_expansion_omits_expired_context_without_mutating_the_ledger(self) -> None:
+        with Ledger(":memory:") as ledger:
+            ledger.add_task(
+                "M-1001", "Implement a change", "The focused checks pass", scope=["repo/api"]
+            )
+            with patch("el_hidratador.core.time.time", return_value=100):
+                expired = ledger.add_context("M-1001", "expired reference", "old", ttl=1)
+                ledger.add_context("M-1001", "current reference", "current", ttl=10)
+            before_entries = ledger.context_entries("M-1001")
+            before_events = ledger.events()
+            before_changes = ledger.db.total_changes
+            with patch("time.time", return_value=101):
+                result = expand_from_ledger(ledger, "M-1001")
+            self.assertEqual(
+                result["omitted"],
+                [{"hash": expired["hash"], "source": "old", "reason": "expired"}],
+            )
+            self.assertNotIn("expired reference", result["prompt"])
+            self.assertIn("current reference", result["prompt"])
+            self.assertEqual(ledger.context_entries("M-1001"), before_entries)
+            self.assertEqual(ledger.events(), before_events)
+            self.assertEqual(ledger.db.total_changes, before_changes)
+
     def test_packet_contains_mandatory_sections(self) -> None:
         result = build_packet(sample_ticket(), [])
         prompt = result["prompt"]
