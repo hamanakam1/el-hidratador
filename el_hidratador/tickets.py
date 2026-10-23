@@ -29,9 +29,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .errors import NotFound, ValidationError
+from .errors import Conflict, NotFound, ValidationError
 
 TICKET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_EVIDENCE_COLLISION_ATTEMPTS = 128
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -198,20 +199,41 @@ class TicketStore:
         return self.index_path
 
     def write_evidence(self, task_id: str, kind: str, payload: dict[str, Any]) -> Path:
-        """Write one evidence record for a task."""
+        """Publish one complete evidence record without replacing prior records."""
         task_id = self._validate_id(task_id)
         safe_kind = re.sub(r"[^a-z0-9._-]+", "-", str(kind or "record").lower()).strip("-")
-        if not safe_kind:
-            raise ValidationError("invalid evidence kind")
+        if not safe_kind or len(safe_kind) > 64:
+            raise ValidationError("evidence kind must contain 1 to 64 filename characters")
+        text = json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n"
         directory = self.evidence_dir / task_id
-        existing = sorted(directory.glob(f"{safe_kind}*.json")) if directory.exists() else []
-        path = (
-            directory / f"{safe_kind}.json"
-            if not existing
-            else directory / f"{safe_kind}-{len(existing) + 1}.json"
-        )
-        _atomic_write(path, json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n")
-        return path
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        pattern = re.compile(rf"{re.escape(safe_kind)}(?:-([0-9]+))?\.json")
+        sequence = 1
+        for existing in directory.iterdir():
+            match = pattern.fullmatch(existing.name)
+            if match:
+                sequence = max(sequence, int(match.group(1) or 1) + 1)
+
+        handle, temp_name = tempfile.mkstemp(dir=str(directory), prefix=".tmp-")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            for _ in range(_EVIDENCE_COLLISION_ATTEMPTS):
+                filename = f"{safe_kind}.json" if sequence == 1 else f"{safe_kind}-{sequence}.json"
+                path = directory / filename
+                try:
+                    # Linking a complete private file publishes it atomically,
+                    # and refuses any existing destination, even a symlink.
+                    os.link(temp_name, path)
+                except FileExistsError:
+                    sequence += 1
+                    continue
+                return path
+            raise Conflict("evidence publication collided repeatedly; retry the write")
+        finally:
+            os.unlink(temp_name)
 
     def evidence(self, task_id: str) -> list[dict[str, Any]]:
         """Read every evidence record for a task."""

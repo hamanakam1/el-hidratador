@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from el_hidratador.cli import main
-from el_hidratador.errors import ValidationError
+from el_hidratador.errors import Conflict, ValidationError
 from el_hidratador.tickets import TicketStore, parse_front_matter, render_ticket
 
 
@@ -66,6 +70,101 @@ class TicketStoreTests(unittest.TestCase):
         self.assertTrue(path.exists())
         records = self.store.evidence("M-397001")
         self.assertEqual(records[0]["tokens"], 100)
+
+    def test_sparse_evidence_history_is_preserved(self) -> None:
+        first = self.store.write_evidence("M-1001", "checkpoint", {"summary": "first"})
+        third = first.with_name("checkpoint-3.json")
+        third.write_text('{"summary": "third"}\n', encoding="utf-8")
+        before = {path: path.read_bytes() for path in (first, third)}
+
+        added = self.store.write_evidence("M-1001", "checkpoint", {"summary": "new"})
+
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        self.assertEqual(added.name, "checkpoint-4.json")
+        self.assertEqual(len(self.store.evidence("M-1001")), 3)
+
+    def test_similarly_prefixed_evidence_kinds_have_independent_numbering(self) -> None:
+        other = self.store.write_evidence("M-1001", "checkpoint-notes", {"summary": "notes"})
+        original = other.read_bytes()
+        first = self.store.write_evidence("M-1001", "checkpoint", {"summary": "first"})
+        second = self.store.write_evidence("M-1001", "checkpoint", {"summary": "second"})
+        self.assertEqual(first.name, "checkpoint.json")
+        self.assertEqual(second.name, "checkpoint-2.json")
+        self.assertEqual(other.read_bytes(), original)
+
+    def test_concurrent_evidence_writers_preserve_every_record(self) -> None:
+        writers = 8
+        ready = threading.Barrier(writers, timeout=5)
+        original = tempfile.mkstemp
+
+        def simultaneous_temporary_files(*args, **kwargs):
+            result = original(*args, **kwargs)
+            ready.wait()
+            return result
+
+        def write_record(number: int) -> Path:
+            return TicketStore(self.store.root).write_evidence(
+                "M-1001", "checkpoint", {"writer": number}
+            )
+
+        with (
+            patch("el_hidratador.tickets.tempfile.mkstemp", simultaneous_temporary_files),
+            ThreadPoolExecutor(max_workers=writers) as pool,
+        ):
+            paths = list(pool.map(write_record, range(writers)))
+
+        self.assertEqual(len(set(paths)), writers)
+        self.assertEqual(
+            {json.loads(path.read_text(encoding="utf-8"))["writer"] for path in paths},
+            set(range(writers)),
+        )
+        self.assertEqual(len(self.store.evidence("M-1001")), writers)
+        self.assertEqual(list(paths[0].parent.glob(".tmp-*")), [])
+
+    def test_evidence_publication_exposes_only_complete_private_json(self) -> None:
+        payload = {"summary": "synthetic evidence", "details": ["one", "two"]}
+        original = os.link
+
+        def inspect_publication(source, destination):
+            source = Path(source)
+            destination = Path(destination)
+            self.assertEqual(json.loads(source.read_text(encoding="utf-8")), payload)
+            self.assertEqual(source.stat().st_mode & 0o077, 0)
+            self.assertEqual(list(destination.parent.glob("*.json")), [])
+            original(source, destination)
+            self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), payload)
+
+        with patch("el_hidratador.tickets.os.link", side_effect=inspect_publication) as publish:
+            path = self.store.write_evidence("M-1001", "checkpoint", payload)
+        publish.assert_called_once()
+        self.assertEqual(path.stat().st_mode & 0o077, 0)
+        self.assertEqual(list(path.parent.glob(".tmp-*")), [])
+
+    def test_failed_evidence_publication_preserves_history_and_removes_temporary_file(self) -> None:
+        first = self.store.write_evidence("M-1001", "checkpoint", {"summary": "first"})
+        before = first.read_bytes()
+        with (
+            patch("el_hidratador.tickets.os.link", side_effect=OSError("synthetic failure")),
+            self.assertRaises(OSError),
+        ):
+            self.store.write_evidence("M-1001", "checkpoint", {"summary": "new"})
+        self.assertEqual(first.read_bytes(), before)
+        self.assertEqual(list(first.parent.iterdir()), [first])
+
+    def test_evidence_collision_retries_are_bounded(self) -> None:
+        with (
+            patch("el_hidratador.tickets.os.link", side_effect=FileExistsError) as publish,
+            self.assertRaises(Conflict),
+        ):
+            self.store.write_evidence("M-1001", "checkpoint", {"summary": "new"})
+        self.assertGreater(publish.call_count, 1)
+        self.assertLessEqual(publish.call_count, 128)
+        self.assertEqual(list((self.store.evidence_dir / "M-1001").iterdir()), [])
+
+    def test_evidence_kind_length_is_bounded_before_creating_files(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.store.write_evidence("M-1001", "x" * 65, {"summary": "new"})
+        self.assertFalse(self.store.root.exists())
 
     def test_evidence_kinds_do_not_escape_the_directory(self) -> None:
         path = self.store.write_evidence("M-397001", "../../escape", {"x": 1})

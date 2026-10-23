@@ -213,7 +213,12 @@ store.write_evidence("M-1001", "finish", {"evidence": "..."})
 ```
 
 Each call writes a new file; a second record of the same kind is written as
-`<kind>-2.json`, `<kind>-3.json`, and so on.
+`<kind>-2.json`, `<kind>-3.json`, and so on. Numbering continues after the highest existing
+suffix, even when earlier filenames are absent. Concurrent writers publish complete JSON files
+without replacing existing records; collisions advance the suffix, with bounded retries that
+raise `Conflict` if contention persists. Publication uses a hard link within the evidence
+directory and requires a filesystem that supports it. Evidence kinds are limited to 64 filename
+characters, and new evidence files are readable and writable only by their owner.
 
 ---
 

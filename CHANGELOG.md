@@ -6,8 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet. Open an issue or a discussion before starting work on something
-large — the `roadmap` label tracks what is already planned.
+### Fixed
+
+- Ticket updates cannot remove, replace, or expand scope reservations while a task is in
+  progress, blocked, or in review. Refused updates preserve the ticket and its audit events.
+- Context expansion excludes expired attachments from both packets and rendered prompts,
+  reports each omission, and refuses invalid expiration timestamps without mutating the ledger.
+- Evidence writes preserve sparse history and simultaneous writers using atomic publication
+  that cannot replace an existing record. New files retain owner-only permissions, collision
+  retries are bounded, and similarly prefixed evidence kinds keep independent numbering.
 
 ## [0.2.0] — 2026-10-22
 
