@@ -96,6 +96,156 @@ class TaskLifecycleTests(LedgerTestCase):
         self.assertEqual(ticket["tags"], ["security"])
 
 
+class TicketValidationTests(LedgerTestCase):
+    def invalid_scalar_fields(self):
+        return {
+            "token_budget": (0, -1, True, 1.5, "10", None, [10], float("inf"), float("nan"), 2**63),
+            "objective": ("", "  ", None, 1, []),
+            "acceptance": ("", "\t", None, 1, []),
+            "kind": ("", " ", "invented", None, 1, []),
+            "priority": (0, 4, -1, True, 1.5, "2", None, [2], float("inf")),
+            "title": (None, 1, []),
+            "owner": (None, 1, []),
+            "description": (None, 1, []),
+        }
+
+    def test_invalid_scalar_updates_are_atomic_typed_refusals(self) -> None:
+        self.make_task()
+        for field, values in self.invalid_scalar_fields().items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    before = self.ledger.task("M-1001")
+                    events = self.ledger.events()
+                    with self.assertRaises(ValidationError):
+                        self.ledger.update_task("M-1001", **{"owner": "changed", field: value})
+                    self.assertEqual(self.ledger.task("M-1001"), before)
+                    self.assertEqual(self.ledger.events(), events)
+
+    def test_creation_enforces_the_same_scalar_constraints(self) -> None:
+        index = 1001
+        for field, values in self.invalid_scalar_fields().items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    events = self.ledger.events()
+                    with self.assertRaises(ValidationError):
+                        self.make_task(f"M-{index}", **{field: value})
+                    self.assertEqual(self.ledger.events(), events)
+                    with self.assertRaises(NotFound):
+                        self.ledger.task(f"M-{index}")
+                index += 1
+
+    def test_invalid_collection_updates_are_atomic_typed_refusals(self) -> None:
+        self.make_task()
+        for field in ("scope", "tags", "depends_on", "blocks", "acceptance_criteria"):
+            values = [None, "repo/api", b"repo/api", {"repo/api": True}, [None], [1]]
+            if field == "scope":
+                values.extend([[], [""], ["  "], ["repo/api", " "]])
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    before = self.ledger.task("M-1001")
+                    events = self.ledger.events()
+                    with self.assertRaises(ValidationError):
+                        self.ledger.update_task("M-1001", title="changed", **{field: value})
+                    self.assertEqual(self.ledger.task("M-1001"), before)
+                    self.assertEqual(self.ledger.events(), events)
+
+    def test_creation_refuses_invalid_collection_types_and_empty_scope(self) -> None:
+        index = 1001
+        for field in ("scope", "tags", "depends_on", "blocks", "acceptance_criteria"):
+            values = ["repo/api", b"repo/api", {"repo/api": True}, [None], [1]]
+            if field == "scope":
+                values.extend([[], [""], ["  "], ["repo/api", " "]])
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    events = self.ledger.events()
+                    with self.assertRaises(ValidationError):
+                        self.make_task(f"M-{index}", **{field: value})
+                    self.assertEqual(self.ledger.events(), events)
+                    with self.assertRaises(NotFound):
+                        self.ledger.task(f"M-{index}")
+                index += 1
+
+    def test_refused_infinite_budget_preserves_budget_enforcement(self) -> None:
+        self.make_task(token_budget=10)
+        with self.assertRaises(ValidationError):
+            self.ledger.update_task("M-1001", token_budget=float("inf"))
+        session = self.ledger.start("M-1001", "terminal-1")
+        result = self.ledger.checkpoint(session["session_id"], "summary", "evidence", "next", 10)
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(self.ledger.task("M-1001")["token_budget"], 10)
+
+    def test_refused_empty_scope_preserves_scope_exclusivity(self) -> None:
+        self.make_task("M-1001", scope=["repo/api"])
+        self.make_task("M-1002", scope=["repo/api"])
+        with self.assertRaises(ValidationError):
+            self.ledger.update_task("M-1001", scope=[])
+        self.ledger.start("M-1001", "terminal-1")
+        with self.assertRaises(Conflict):
+            self.ledger.start("M-1002", "terminal-2")
+
+    def test_integer_budget_storage_boundaries_remain_supported(self) -> None:
+        for index, budget in enumerate((1, 2**63 - 1)):
+            with self.subTest(budget=budget):
+                task_id = f"M-{1001 + index}"
+                self.make_task(task_id, token_budget=budget)
+                self.assertEqual(self.ledger.task(task_id)["token_budget"], budget)
+                self.ledger.update_task(task_id, token_budget=budget)
+                self.assertEqual(self.ledger.task(task_id)["token_budget"], budget)
+
+    def test_deliberate_budget_increase_keeps_cumulative_accounting(self) -> None:
+        self.make_task(token_budget=10)
+        first = self.ledger.start("M-1001", "terminal-1")
+        self.ledger.checkpoint(first["session_id"], "summary", "evidence", "next", 10)
+        self.ledger.update_task("M-1001", token_budget=20)
+        self.ledger.decide("M-1001", "retry", "operator increased the budget")
+        second = self.ledger.start("M-1001", "terminal-2")
+        result = self.ledger.checkpoint(second["session_id"], "summary", "new evidence", "next", 10)
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(self.ledger.used_tokens("M-1001"), 20)
+
+    def test_valid_updates_normalize_kind_and_emit_one_event(self) -> None:
+        self.make_task()
+        events = self.ledger.events()
+        fields = {
+            "objective": "new objective",
+            "acceptance": "new acceptance",
+            "kind": " FIX ",
+            "scope": ("repo/web",),
+            "token_budget": 20,
+            "priority": 3,
+            "tags": ("security",),
+            "depends_on": ("M-1002",),
+            "blocks": (),
+            "acceptance_criteria": ("focused tests pass",),
+            "title": "",
+            "owner": "",
+            "description": "",
+        }
+        ticket = self.ledger.update_task("M-1001", **fields)
+        self.assertEqual(ticket["kind"], "fix")
+        self.assertEqual(ticket["scope"], ["repo/web"])
+        self.assertEqual(ticket["tags"], ["security"])
+        self.assertEqual(ticket["token_budget"], 20)
+        self.assertEqual(ticket["priority"], 3)
+        self.assertEqual(ticket["status"], "INBOX")
+        self.assertEqual(len(self.ledger.events()), len(events) + 1)
+        self.assertEqual(self.ledger.events()[-1]["data"], {"fields": sorted(fields)})
+
+    def test_creation_defaults_tuples_and_seed_idempotency_remain_supported(self) -> None:
+        self.make_task(
+            "M-1001", scope=None, kind=" FIX ", tags=("security",), seed_key="synthetic-seed"
+        )
+        before = self.ledger.task("M-1001")
+        events = self.ledger.events()
+        second = self.make_task("M-1002", scope=("repo/web",), seed_key="synthetic-seed")
+        self.assertTrue(second["idempotent"])
+        self.assertEqual(before["scope"], ["M-1001"])
+        self.assertEqual(before["kind"], "fix")
+        self.assertEqual(before["tags"], ["security"])
+        self.assertEqual(self.ledger.task("M-1001"), before)
+        self.assertEqual(self.ledger.events(), events)
+
+
 class ScopeReservationTests(LedgerTestCase):
     def reserve(self, task_id: str, status: str) -> list[str]:
         scope = [f"repo/{task_id}/api", f"repo/{task_id}/web"]

@@ -154,6 +154,53 @@ def _require_nonnegative(value: Any, name: str) -> int:
     return value
 
 
+_TICKET_LIST_FIELDS = ("scope", "tags", "depends_on", "blocks", "acceptance_criteria")
+
+
+def _ticket_string_sequence(value: Any, name: str) -> list[str]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise ValidationError(f"{name} must be a sequence of strings")
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValidationError(f"{name} must contain only strings")
+        items.append(item)
+    return items
+
+
+def _normalize_ticket_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Apply the same field constraints to ticket creation and updates."""
+    normalized = dict(fields)
+    for name, value in fields.items():
+        if name in ("objective", "acceptance"):
+            _require_text(value, name)
+        elif name in ("title", "owner", "description", "seed_key"):
+            if not isinstance(value, str):
+                raise ValidationError(f"{name} must be text")
+        elif name == "token_budget":
+            _require_positive(value, name)
+            if value > 2**63 - 1:
+                raise ValidationError("token_budget exceeds the SQLite integer storage limit")
+        elif name == "priority":
+            if type(value) is not int or not 1 <= value <= 3:
+                raise ValidationError("priority must be 1 (P0) .. 3 (P3)")
+        elif name == "kind":
+            kind = _require_text(value, name).strip().lower()
+            try:
+                normalized[name] = TicketKind(kind).value
+            except ValueError as exc:
+                allowed = ", ".join(item.value for item in TicketKind)
+                raise ValidationError(
+                    f"unknown kind {value!r}; expected one of: {allowed}"
+                ) from exc
+        elif name in _TICKET_LIST_FIELDS:
+            items = _ticket_string_sequence(value, name)
+            if name == "scope" and (not items or any(not item.strip() for item in items)):
+                raise ValidationError("scope must contain nonempty resource keys")
+            normalized[name] = items
+    return normalized
+
+
 def _normalize_status(value: Any) -> str:
     text = str(value or "").strip().upper()
     try:
@@ -663,20 +710,26 @@ class Ledger:
     ) -> dict[str, Any]:
         """Create a task. Idempotent when a ``seed_key`` repeats."""
         task_id = _require_text(task_id, "task id").strip()
-        objective = _require_text(objective, "objective")
-        acceptance = _require_text(acceptance, "acceptance")
-        _require_positive(token_budget, "token_budget")
-        scope_list = [str(item) for item in (scope or [task_id]) if str(item).strip()]
-        if not scope_list:
-            raise ValidationError("scope must contain at least one resource key")
-        kind_value = str(kind or TicketKind.CODE.value).strip().lower()
-        try:
-            TicketKind(kind_value)
-        except ValueError as exc:
-            allowed = ", ".join(k.value for k in TicketKind)
-            raise ValidationError(f"unknown kind {kind!r}; expected one of: {allowed}") from exc
-        if not isinstance(priority, int) or not 1 <= priority <= 3:
-            raise ValidationError("priority must be 1 (P0) .. 3 (P3)")
+        fields = _normalize_ticket_fields(
+            {
+                "objective": objective,
+                "acceptance": acceptance,
+                "title": title,
+                "kind": kind,
+                "scope": [task_id] if scope is None else scope,
+                "token_budget": token_budget,
+                "tags": [] if tags is None else tags,
+                "depends_on": [] if depends_on is None else depends_on,
+                "blocks": [] if blocks is None else blocks,
+                "owner": owner,
+                "seed_key": seed_key,
+                "description": description,
+                "acceptance_criteria": [] if acceptance_criteria is None else acceptance_criteria,
+                "priority": priority,
+            }
+        )
+        scope_list = fields["scope"]
+        kind_value = fields["kind"]
 
         with self.transaction():
             if seed_key:
@@ -703,13 +756,13 @@ class Ledger:
                     TicketStatus.INBOX.value,
                     priority,
                     token_budget,
-                    json.dumps([str(tag) for tag in (tags or [])]),
-                    json.dumps([str(dep) for dep in (depends_on or [])]),
-                    json.dumps([str(block) for block in (blocks or [])]),
-                    str(owner or ""),
-                    str(seed_key or ""),
-                    str(description or ""),
-                    json.dumps([str(item) for item in (acceptance_criteria or [])]),
+                    json.dumps(fields["tags"]),
+                    json.dumps(fields["depends_on"]),
+                    json.dumps(fields["blocks"]),
+                    owner,
+                    seed_key,
+                    description,
+                    json.dumps(fields["acceptance_criteria"]),
                     now,
                     now,
                 ),
@@ -743,29 +796,26 @@ class Ledger:
             raise ValidationError(f"cannot update field(s): {', '.join(sorted(unknown))}")
         with self.transaction():
             ticket = self.get_ticket(task_id)
+            if "scope" in fields and ticket.status in (
+                TicketStatus.IN_PROGRESS.value,
+                TicketStatus.BLOCKED.value,
+                TicketStatus.REVIEW.value,
+            ):
+                scope = _ticket_string_sequence(fields["scope"], "scope")
+                if set(scope) != set(ticket.scope):
+                    raise Conflict(
+                        f"cannot change scope while task is {ticket.status}; "
+                        "release the reservation through an operator decision first"
+                    )
+            fields = _normalize_ticket_fields(fields)
             assignments: list[str] = []
             values: list[Any] = []
             for key, value in fields.items():
                 if not IDENTIFIER.match(key):
                     raise ValidationError(f"invalid column name: {key}")
                 assignments.append(f"{key}=?")
-                if key in ("scope", "tags", "depends_on", "blocks", "acceptance_criteria"):
-                    items = [str(item) for item in value]
-                    if (
-                        key == "scope"
-                        and ticket.status
-                        in (
-                            TicketStatus.IN_PROGRESS.value,
-                            TicketStatus.BLOCKED.value,
-                            TicketStatus.REVIEW.value,
-                        )
-                        and set(items) != set(ticket.scope)
-                    ):
-                        raise Conflict(
-                            f"cannot change scope while task is {ticket.status}; "
-                            "release the reservation through an operator decision first"
-                        )
-                    values.append(json.dumps(items))
+                if key in _TICKET_LIST_FIELDS:
+                    values.append(json.dumps(value))
                 else:
                     values.append(value)
             if assignments:
