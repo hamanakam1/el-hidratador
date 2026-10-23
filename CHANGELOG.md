@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Ticket creation and updates validate required text, kind, scope, budget, priority, and collection
+  types before writing. Invalid updates cannot erase scope or bypass the cumulative token budget,
+  and refusals preserve the ticket and audit history.
+- Schema validation distinguishes booleans from numbers in constant and enumeration checks,
+  including nested values. Non-finite numbers are refused, and array errors retain their indices.
+- The CLI returns exit code `2` and `ok: false` for schema mismatches, and typed errors for malformed
+  JSON, non-UTF-8 documents, and noninteger ticket updates. Schema checks never open a ledger.
+- Repeatable `task-update --list` values no longer require an unused `--value` argument.
 - Ticket updates cannot remove, replace, or expand scope reservations while a task is in
   progress, blocked, or in review. Refused updates preserve the ticket and its audit events.
 - Context expansion excludes expired attachments from both packets and rendered prompts,

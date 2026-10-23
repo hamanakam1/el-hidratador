@@ -322,6 +322,47 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["count"], 5)
         self.assertTrue(Path(target, "handoff.json").exists())
 
+    def test_schema_invalid_document_returns_failure_without_opening_ledger(self) -> None:
+        document = Path(self.tmp.name) / "invalid-handoff.json"
+        document.write_text("{}", encoding="utf-8")
+        code, payload = self._run("schema", "--validate", str(document), "--against", "handoff")
+        self.assertEqual(code, 2)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["valid"])
+        self.assertTrue(payload["errors"])
+        self.assertFalse(Path(self.db).exists())
+
+    def test_schema_valid_document_succeeds_without_opening_ledger(self) -> None:
+        document = Path(self.tmp.name) / "valid-ticket.json"
+        document.write_text(
+            json.dumps(
+                {
+                    "id": "M-1001",
+                    "objective": "o",
+                    "acceptance": "a",
+                    "status": "INBOX",
+                }
+            ),
+            encoding="utf-8",
+        )
+        code, payload = self._run("schema", "--validate", str(document), "--against", "ticket")
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["errors"], [])
+        self.assertFalse(Path(self.db).exists())
+
+    def test_schema_malformed_json_returns_typed_error_without_opening_ledger(self) -> None:
+        document = Path(self.tmp.name) / "malformed.json"
+        for content in (b'{"authorized":', b'"\xff"'):
+            with self.subTest(content=content):
+                document.write_bytes(content)
+                code, payload = self._run("schema", "--validate", str(document))
+                self.assertEqual(code, 2)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["kind"], "ValidationError")
+                self.assertFalse(Path(self.db).exists())
+
     def test_replay_reports_a_missing_task(self) -> None:
         code, payload = self._run("replay", "M-does-not-exist")
         self.assertEqual(code, 2)
@@ -364,6 +405,57 @@ class CliTests(unittest.TestCase):
         code, payload = self._run("task-update", "M-1001", "--field", "status", "--value", "DONE")
         self.assertEqual(code, 2)
         self.assertFalse(payload["ok"])
+
+    def test_task_update_noninteger_returns_typed_error_without_mutation(self) -> None:
+        self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
+        _, before = self._run("task-show", "M-1001")
+        _, events_before = self._run("events")
+        for field, value in (("token_budget", "inf"), ("priority", "1.5")):
+            with self.subTest(field=field):
+                code, payload = self._run(
+                    "task-update", "M-1001", "--field", field, "--value", value
+                )
+                self.assertEqual(code, 2)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["kind"], "ValidationError")
+        _, after = self._run("task-show", "M-1001")
+        _, events_after = self._run("events")
+        self.assertEqual(after, before)
+        self.assertEqual(events_after, events_before)
+
+    def test_task_update_refuses_a_list_for_a_scalar_field(self) -> None:
+        self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
+        _, before = self._run("task-show", "M-1001")
+        _, events_before = self._run("events")
+        code, payload = self._run(
+            "task-update", "M-1001", "--field", "token_budget", "--list", "9000"
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["kind"], "ValidationError")
+        _, after = self._run("task-show", "M-1001")
+        _, events_after = self._run("events")
+        self.assertEqual(after, before)
+        self.assertEqual(events_after, events_before)
+
+    def test_task_update_accepts_repeatable_list_without_a_placeholder_value(self) -> None:
+        self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
+        code, payload = self._run(
+            "task-update", "M-1001", "--field", "tags", "--list", "security", "--list", "auth"
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["tags"], ["security", "auth"])
+
+    def test_task_update_requires_an_explicit_value(self) -> None:
+        self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
+        _, before = self._run("task-show", "M-1001")
+        _, events_before = self._run("events")
+        code, payload = self._run("task-update", "M-1001", "--field", "title")
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["kind"], "ValidationError")
+        _, after = self._run("task-show", "M-1001")
+        _, events_after = self._run("events")
+        self.assertEqual(after, before)
+        self.assertEqual(events_after, events_before)
 
     def test_handoff_schema_prints_the_published_contract(self) -> None:
         code, payload = self._run("handoff", "M-1001", "--schema")
