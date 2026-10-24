@@ -1,3 +1,5 @@
+> **Español:** Una traducción de esta página está disponible en [glossary.es.md](glossary.es.md).
+
 # Glossary
 
 Every domain term in El Hidratador, defined once. The definitions are the ones the code uses, not

@@ -1,3 +1,5 @@
+> **Español:** Una traducción de esta página está disponible en [getting-started.es.md](getting-started.es.md).
+
 # Getting started
 
 El Hidratador turns a **dry** ticket — fifty words of intent — into a **wet** execution packet:

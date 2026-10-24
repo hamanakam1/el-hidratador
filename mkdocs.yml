@@ -57,9 +57,15 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Getting started: getting-started.md
-  - Glossary: glossary.md
-  - FAQ: faq.md
+  - Getting started: 
+    - English: getting-started.md
+    - Español: getting-started.es.md
+  - Glossary: 
+    - English: glossary.md
+    - Español: glossary.es.md
+  - FAQ: 
+    - English: faq.md
+    - Español: faq.es.md
   - Install: install.md
   - Architecture: architecture.md
   - CLI reference: cli-reference.md
