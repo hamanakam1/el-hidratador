@@ -1,5 +1,11 @@
 # El Hidratador
 
+[![CI](https://github.com/hamanakam1/el-hidratador/actions/workflows/ci.yml/badge.svg)](https://github.com/hamanakam1/el-hidratador/actions/workflows/ci.yml)
+[![Lint](https://github.com/hamanakam1/el-hidratador/actions/workflows/lint.yml/badge.svg)](https://github.com/hamanakam1/el-hidratador/actions/workflows/lint.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python: 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](pyproject.toml)
+
 ```text
 ███████╗██╗  ██╗██╗   ██╗███████╗██████╗ ██╗   ██╗██╗  ██╗ ██████╗ ██████╗ ██████╗ ██╗   ██╗
 ██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗██║   ██║██║  ██║██╔═══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝
@@ -17,9 +23,11 @@ context, an ordered execution DAG, a locked sandbox specification, and a routed 
 
 > **Pipeline position:** downstream from the Ticket Board, upstream from Taskrivet.
 
-```text
-Ticket Board ──► [ El Hidratador ] ──► Taskrivet ──► Operator review
-   (dry)          hydration + staging      (wet)         (acceptance)
+```mermaid
+flowchart LR
+    TB["<b>Ticket Board</b><br/><i>(dry intent)</i>"] --> EH["<b>El Hidratador</b><br/><i>hydration & staging</i>"]
+    EH --> TR["<b>Taskrivet</b><br/><i>(wet execution)</i>"]
+    TR --> OR["<b>Operator review</b><br/><i>(acceptance)</i>"]
 ```
 
 ---
