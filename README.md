@@ -7,12 +7,13 @@
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](pyproject.toml)
 
 ```text
-███████╗██╗  ██╗██╗   ██╗███████╗██████╗ ██╗   ██╗██╗  ██╗ ██████╗ ██████╗ ██████╗ ██╗   ██╗
-██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗██║   ██║██║  ██║██╔═══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝
-███████╗███████║██║   ██║███████╗██████╔╝██║   ██║███████║██║   ██║██████╔╝██████╔╝██║  ██║ ╚████╔╝
-╚════██║╚════██║██║   ██║╚════██║██╔═══╝ ██║   ██║██╔════╝██║   ██║██╔══██╗██╔══██╗██║  ██║  ╚██╔╝
-███████║     ██║╚██████╔╝███████║██║     ███████╗██║     ██║╚██████╔╝██║  ██║██████╔╝██║  ██║   ██║
-╚══════╝     ╚═╝ ╚═════╝ ╚══════╝╚═╝     ╚══════╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝   ╚═╝
+EEEEE  L          H   H  IIIII  DDDD   RRRR    AAA   TTTTT   AAA   DDDD    OOO   RRRR
+E      L          H   H    I    D   D  R   R  A   A    T    A   A  D   D  O   O  R   R
+EEEE   L          HHHHH    I    D   D  RRRR   AAAAA    T    AAAAA  D   D  O   O  RRRR
+E      L          H   H    I    D   D  R  R   A   A    T    A   A  D   D  O   O  R  R
+EEEEE  LLLLL      H   H  IIIII  DDDD   R   R  A   A    T    A   A  DDDD    OOO   R   R
+
+  >_ Turn dry semantic tickets into wet execution state.
 ```
 
 **The Context Expansion and Execution Staging Engine.**
