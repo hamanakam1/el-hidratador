@@ -3,7 +3,7 @@
 # The package is standard library only, so the image stays small on purpose.
 # The ledger is mounted, never baked in.
 
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /build
 COPY pyproject.toml README.md LICENSE ./
@@ -11,7 +11,7 @@ COPY el_hidratador ./el_hidratador
 RUN python -m pip install --no-cache-dir --upgrade pip build \
     && python -m build --wheel --outdir /dist
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 LABEL org.opencontainers.image.title="el-hidratador" \
       org.opencontainers.image.description="Context expansion and execution staging engine" \
