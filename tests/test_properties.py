@@ -4,6 +4,7 @@ These tests use Hypothesis, which is declared in the `dev` extra of `pyproject.t
 The suite still runs on a machine without Hypothesis: the property tests are skipped, and
 the example-based tests always run.
 """
+
 from __future__ import annotations
 
 import unittest
@@ -172,7 +173,6 @@ class ManifestProperties(unittest.TestCase):
     def test_different_task_lists_produce_different_nodes(
         self, objective: str, acceptance: str, task_text_a: str, task_text_b: str
     ) -> None:
-        ticket = _sample_ticket(objective, acceptance)
         dag_a = build_dag("M-1001", markdown=f"## Tasks\n- [ ] {task_text_a}\n")
         dag_b = build_dag("M-1001", markdown=f"## Tasks\n- [ ] {task_text_b}\n")
         titles_a = [node.title for node in dag_a.nodes]
