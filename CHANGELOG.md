@@ -6,8 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet. Open an issue or a discussion before starting work on something
-large — the `roadmap` label tracks what is already planned.
+### Fixed
+
+- Replay reads the complete task history in one read snapshot and never reconciles expired leases.
+  The CLI opens an existing ledger read-only, refusing missing or outdated databases without
+  initializing, migrating, or changing their permissions.
+- Ticket creation and updates validate required text, kind, scope, budget, priority, and collection
+  types before writing. Invalid updates cannot erase scope or bypass the cumulative token budget,
+  and refusals preserve the ticket and audit history.
+- Schema validation distinguishes booleans from numbers in constant and enumeration checks,
+  including nested values. Non-finite numbers are refused, and array errors retain their indices.
+- The CLI returns exit code `2` and `ok: false` for schema mismatches, and typed errors for malformed
+  JSON, non-UTF-8 documents, and noninteger ticket updates. Schema checks never open a ledger.
+- Repeatable `task-update --list` values no longer require an unused `--value` argument.
+- Ticket updates cannot remove, replace, or expand scope reservations while a task is in
+  progress, blocked, or in review. Refused updates preserve the ticket and its audit events.
+- Context expansion excludes expired attachments from both packets and rendered prompts,
+  reports each omission, and refuses invalid expiration timestamps without mutating the ledger.
+- Evidence writes preserve sparse history and simultaneous writers using atomic publication
+  that cannot replace an existing record. New files retain owner-only permissions, collision
+  retries are bounded, and similarly prefixed evidence kinds keep independent numbering.
 
 ## [0.2.0] — 2026-10-22
 

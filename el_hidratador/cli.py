@@ -138,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_update = sub.add_parser("task-update", help="change a ticket field")
     task_update.add_argument("id")
     task_update.add_argument("--field", required=True, help="the field to change")
-    task_update.add_argument("--value", required=True, help="the new value")
+    task_update.add_argument("--value", help="the new value; omit when using --list")
     task_update.add_argument(
         "--list", dest="value_list", action="append", default=None, help="a list value, repeatable"
     )
@@ -319,9 +319,13 @@ def run(argv: Sequence[str] | None = None) -> int:
             payload.setdefault("ok", True)
             payload["command"] = command
             _emit(payload, pretty)
-            return 0
+            return 2 if command == "schema" and payload.get("valid") is False else 0
 
-        ledger = create_ledger(_db_path(args))
+        ledger = (
+            Ledger(_db_path(args), read_only=True)
+            if command == "replay"
+            else create_ledger(_db_path(args))
+        )
         try:
             if command == "events" and args.follow:
                 try:
@@ -431,10 +435,15 @@ def _cmd_task_update(args: argparse.Namespace, ledger: Ledger) -> dict[str, Any]
     value: object
     if args.value_list is not None:
         value = list(args.value_list)
+    elif args.value is None:
+        raise ValidationError("task-update requires --value or --list")
     elif args.field in ("scope", "tags", "depends_on", "blocks", "acceptance_criteria"):
         value = [part.strip() for part in args.value.split(",") if part.strip()]
     elif args.field == "token_budget" or args.field == "priority":
-        value = int(args.value)
+        try:
+            value = int(args.value)
+        except ValueError as exc:
+            raise ValidationError(f"{args.field} must be an integer") from exc
     else:
         value = args.value
     return ledger.update_task(args.id, **{args.field: value})
@@ -459,9 +468,13 @@ def _cmd_schema(args: argparse.Namespace, ledger: Ledger) -> dict[str, Any]:
             written.append(str(path))
         return {"written": written, "count": len(written)}
     if args.validate_file:
-        document = json.loads(Path(args.validate_file).read_text(encoding="utf-8"))
+        try:
+            document = json.loads(Path(args.validate_file).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValidationError("schema validation requires a UTF-8 JSON document") from exc
         errors = validate_named(document, args.against)
         return {
+            "ok": not errors,
             "file": args.validate_file,
             "schema": args.against,
             "valid": not errors,

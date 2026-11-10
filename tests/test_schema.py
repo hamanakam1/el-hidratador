@@ -75,6 +75,74 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(validate("c", schema))
         self.assertEqual(validate("a", schema), [])
 
+    def test_const_and_enum_distinguish_booleans_from_numbers_recursively(self) -> None:
+        cases = [
+            (0, False),
+            (1, True),
+            (False, 0),
+            (True, 1),
+            ([0], [False]),
+            ({"flag": 1}, {"flag": True}),
+            ({"nested": [{"flag": 0}]}, {"nested": [{"flag": False}]}),
+        ]
+        for instance, expected in cases:
+            for schema in ({"const": expected}, {"enum": [expected]}):
+                with self.subTest(instance=instance, schema=schema):
+                    self.assertTrue(validate(instance, schema))
+
+    def test_const_and_enum_preserve_json_numeric_equivalence(self) -> None:
+        cases = [
+            (1, 1.0),
+            (1.0, 1),
+            (0, -0.0),
+            ([1, {"value": 2.0}], [1.0, {"value": 2}]),
+            ({"first": 1, "second": [2]}, {"second": [2.0], "first": 1.0}),
+            (False, False),
+            (None, None),
+            ("one", "one"),
+        ]
+        for instance, expected in cases:
+            for schema in ({"const": expected}, {"enum": [expected]}):
+                with self.subTest(instance=instance, schema=schema):
+                    self.assertEqual(validate(instance, schema), [])
+
+    def test_combinators_use_json_equality_for_constants_and_enums(self) -> None:
+        alternatives = [{"const": False}, {"enum": [0]}]
+        for instance in (False, 0, 0.0):
+            with self.subTest(instance=instance):
+                self.assertEqual(validate(instance, {"oneOf": alternatives}), [])
+        self.assertTrue(validate(0, {"anyOf": [{"const": False}, {"enum": [True]}]}))
+        self.assertTrue(validate(1, {"oneOf": [{"const": 1}, {"const": 1.0}]}))
+
+    def test_nonfinite_numbers_are_rejected_without_numeric_constraints(self) -> None:
+        schemas = [{}, {"type": "number"}, {"anyOf": [{}]}, {"oneOf": [{}]}]
+        for value in (float("nan"), float("inf"), float("-inf")):
+            for schema in schemas:
+                with self.subTest(value=value, schema=schema):
+                    errors = validate(value, schema)
+                    self.assertTrue(errors)
+                    self.assertTrue(any("finite" in error for error in errors))
+
+    def test_nonfinite_values_in_unrestricted_nested_fields_are_rejected(self) -> None:
+        instance = {"extra": [{"value": float("nan")}, float("inf")]}
+        for schema in ({}, {"type": "object"}, {"properties": {"extra": {"type": "array"}}}):
+            with self.subTest(schema=schema):
+                errors = validate(instance, schema)
+                self.assertEqual(len(errors), 2)
+                self.assertTrue(any(error.startswith("$.extra[0].value:") for error in errors))
+                self.assertTrue(any(error.startswith("$.extra[1]:") for error in errors))
+
+    def test_every_array_item_error_keeps_its_full_indexed_path(self) -> None:
+        schema = {"items": {"properties": {"value": {"minLength": 3, "pattern": "^[0-9]+$"}}}}
+        errors = validate([{"value": "a"}, {"value": "123"}], schema)
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all(error.startswith("$[0].value:") for error in errors))
+
+    def test_valid_array_items_do_not_relabel_the_parent_error(self) -> None:
+        self.assertEqual(
+            validate([1], {"minItems": 2, "items": {"type": "integer"}}), ["$: fewer than 2 items"]
+        )
+
     def test_numeric_bounds_are_enforced(self) -> None:
         schema = {"type": "integer", "minimum": 1, "maximum": 3}
         self.assertTrue(validate(0, schema))
@@ -134,6 +202,21 @@ class ContractTests(unittest.TestCase):
         result = manifest(dag, self.ledger.task("M-1001"))
         self.assertEqual(validate_named(result, "manifest"), [])
 
+    def test_manifest_execution_authorized_zero_does_not_bypass_false_contract(self) -> None:
+        payload = {
+            "task_id": "M-1001",
+            "nodes": [],
+            "execution_authorized": False,
+            "provenance": "synthetic fixture",
+        }
+        self.assertEqual(validate_named(payload, "manifest"), [])
+        for value in (0, 0.0, True):
+            with self.subTest(value=value):
+                errors = validate_named({**payload, "execution_authorized": value}, "manifest")
+                self.assertTrue(
+                    any(error.startswith("$.execution_authorized:") for error in errors)
+                )
+
     def test_a_sandbox_matches_the_sandbox_schema(self) -> None:
         spec = build_sandbox("M-1001", "/tmp/work")
         self.assertEqual(validate_named(spec, "sandbox"), [])
@@ -155,6 +238,21 @@ class ContractTests(unittest.TestCase):
         )
         self.assertFalse(payload["authorized"])
         self.assertTrue(validate_named(payload, "handoff"))
+
+    def test_handoff_false_contracts_reject_numeric_zero(self) -> None:
+        self.ledger.add_task("M-1001", "objective", "acceptance", scope=["repo/api"])
+        ticket = self.ledger.task("M-1001")
+        dag = build_dag("M-1001", markdown="## Tasks\n- [ ] Do the work\n")
+        packet = self.ledger.pack("M-1001", 12000)["packet"]
+        payload = handoff_payload(dag, packet, ticket, build_sandbox("M-1001", "/tmp/work"))
+        self.assertEqual(validate_named(payload, "handoff"), [])
+        payload["authorized"] = 0
+        payload["manifest"]["execution_authorized"] = 0.0
+        errors = validate_named(payload, "handoff")
+        self.assertTrue(any(error.startswith("$.authorized:") for error in errors))
+        self.assertTrue(
+            any(error.startswith("$.manifest.execution_authorized:") for error in errors)
+        )
 
     def test_the_published_schema_files_are_current(self) -> None:
         """The copies in the repository must match the module."""

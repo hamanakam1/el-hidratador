@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from el_hidratador.cli import main
-from el_hidratador.errors import ValidationError
+from el_hidratador.errors import Conflict, ValidationError
 from el_hidratador.tickets import TicketStore, parse_front_matter, render_ticket
 
 
@@ -66,6 +70,101 @@ class TicketStoreTests(unittest.TestCase):
         self.assertTrue(path.exists())
         records = self.store.evidence("M-397001")
         self.assertEqual(records[0]["tokens"], 100)
+
+    def test_sparse_evidence_history_is_preserved(self) -> None:
+        first = self.store.write_evidence("M-1001", "checkpoint", {"summary": "first"})
+        third = first.with_name("checkpoint-3.json")
+        third.write_text('{"summary": "third"}\n', encoding="utf-8")
+        before = {path: path.read_bytes() for path in (first, third)}
+
+        added = self.store.write_evidence("M-1001", "checkpoint", {"summary": "new"})
+
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        self.assertEqual(added.name, "checkpoint-4.json")
+        self.assertEqual(len(self.store.evidence("M-1001")), 3)
+
+    def test_similarly_prefixed_evidence_kinds_have_independent_numbering(self) -> None:
+        other = self.store.write_evidence("M-1001", "checkpoint-notes", {"summary": "notes"})
+        original = other.read_bytes()
+        first = self.store.write_evidence("M-1001", "checkpoint", {"summary": "first"})
+        second = self.store.write_evidence("M-1001", "checkpoint", {"summary": "second"})
+        self.assertEqual(first.name, "checkpoint.json")
+        self.assertEqual(second.name, "checkpoint-2.json")
+        self.assertEqual(other.read_bytes(), original)
+
+    def test_concurrent_evidence_writers_preserve_every_record(self) -> None:
+        writers = 8
+        ready = threading.Barrier(writers, timeout=5)
+        original = tempfile.mkstemp
+
+        def simultaneous_temporary_files(*args, **kwargs):
+            result = original(*args, **kwargs)
+            ready.wait()
+            return result
+
+        def write_record(number: int) -> Path:
+            return TicketStore(self.store.root).write_evidence(
+                "M-1001", "checkpoint", {"writer": number}
+            )
+
+        with (
+            patch("el_hidratador.tickets.tempfile.mkstemp", simultaneous_temporary_files),
+            ThreadPoolExecutor(max_workers=writers) as pool,
+        ):
+            paths = list(pool.map(write_record, range(writers)))
+
+        self.assertEqual(len(set(paths)), writers)
+        self.assertEqual(
+            {json.loads(path.read_text(encoding="utf-8"))["writer"] for path in paths},
+            set(range(writers)),
+        )
+        self.assertEqual(len(self.store.evidence("M-1001")), writers)
+        self.assertEqual(list(paths[0].parent.glob(".tmp-*")), [])
+
+    def test_evidence_publication_exposes_only_complete_private_json(self) -> None:
+        payload = {"summary": "synthetic evidence", "details": ["one", "two"]}
+        original = os.link
+
+        def inspect_publication(source, destination):
+            source = Path(source)
+            destination = Path(destination)
+            self.assertEqual(json.loads(source.read_text(encoding="utf-8")), payload)
+            self.assertEqual(source.stat().st_mode & 0o077, 0)
+            self.assertEqual(list(destination.parent.glob("*.json")), [])
+            original(source, destination)
+            self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), payload)
+
+        with patch("el_hidratador.tickets.os.link", side_effect=inspect_publication) as publish:
+            path = self.store.write_evidence("M-1001", "checkpoint", payload)
+        publish.assert_called_once()
+        self.assertEqual(path.stat().st_mode & 0o077, 0)
+        self.assertEqual(list(path.parent.glob(".tmp-*")), [])
+
+    def test_failed_evidence_publication_preserves_history_and_removes_temporary_file(self) -> None:
+        first = self.store.write_evidence("M-1001", "checkpoint", {"summary": "first"})
+        before = first.read_bytes()
+        with (
+            patch("el_hidratador.tickets.os.link", side_effect=OSError("synthetic failure")),
+            self.assertRaises(OSError),
+        ):
+            self.store.write_evidence("M-1001", "checkpoint", {"summary": "new"})
+        self.assertEqual(first.read_bytes(), before)
+        self.assertEqual(list(first.parent.iterdir()), [first])
+
+    def test_evidence_collision_retries_are_bounded(self) -> None:
+        with (
+            patch("el_hidratador.tickets.os.link", side_effect=FileExistsError) as publish,
+            self.assertRaises(Conflict),
+        ):
+            self.store.write_evidence("M-1001", "checkpoint", {"summary": "new"})
+        self.assertGreater(publish.call_count, 1)
+        self.assertLessEqual(publish.call_count, 128)
+        self.assertEqual(list((self.store.evidence_dir / "M-1001").iterdir()), [])
+
+    def test_evidence_kind_length_is_bounded_before_creating_files(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.store.write_evidence("M-1001", "x" * 65, {"summary": "new"})
+        self.assertFalse(self.store.root.exists())
 
     def test_evidence_kinds_do_not_escape_the_directory(self) -> None:
         path = self.store.write_evidence("M-397001", "../../escape", {"x": 1})
@@ -223,10 +322,59 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["count"], 5)
         self.assertTrue(Path(target, "handoff.json").exists())
 
+    def test_schema_invalid_document_returns_failure_without_opening_ledger(self) -> None:
+        document = Path(self.tmp.name) / "invalid-handoff.json"
+        document.write_text("{}", encoding="utf-8")
+        code, payload = self._run("schema", "--validate", str(document), "--against", "handoff")
+        self.assertEqual(code, 2)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["valid"])
+        self.assertTrue(payload["errors"])
+        self.assertFalse(Path(self.db).exists())
+
+    def test_schema_valid_document_succeeds_without_opening_ledger(self) -> None:
+        document = Path(self.tmp.name) / "valid-ticket.json"
+        document.write_text(
+            json.dumps(
+                {
+                    "id": "M-1001",
+                    "objective": "o",
+                    "acceptance": "a",
+                    "status": "INBOX",
+                }
+            ),
+            encoding="utf-8",
+        )
+        code, payload = self._run("schema", "--validate", str(document), "--against", "ticket")
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["errors"], [])
+        self.assertFalse(Path(self.db).exists())
+
+    def test_schema_malformed_json_returns_typed_error_without_opening_ledger(self) -> None:
+        document = Path(self.tmp.name) / "malformed.json"
+        for content in (b'{"authorized":', b'"\xff"'):
+            with self.subTest(content=content):
+                document.write_bytes(content)
+                code, payload = self._run("schema", "--validate", str(document))
+                self.assertEqual(code, 2)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["kind"], "ValidationError")
+                self.assertFalse(Path(self.db).exists())
+
     def test_replay_reports_a_missing_task(self) -> None:
         code, payload = self._run("replay", "M-does-not-exist")
         self.assertEqual(code, 2)
         self.assertFalse(payload["ok"])
+
+    def test_replay_missing_ledger_is_not_initialized(self) -> None:
+        for arguments in (("replay", "M-1001"), ("replay", "--all")):
+            with self.subTest(arguments=arguments):
+                code, payload = self._run(*arguments)
+                self.assertEqual(code, 2)
+                self.assertEqual(payload["kind"], "NotFound")
+                self.assertFalse(Path(self.db).exists())
 
     def test_replay_reconstructs_a_lifecycle(self) -> None:
         self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
@@ -265,6 +413,57 @@ class CliTests(unittest.TestCase):
         code, payload = self._run("task-update", "M-1001", "--field", "status", "--value", "DONE")
         self.assertEqual(code, 2)
         self.assertFalse(payload["ok"])
+
+    def test_task_update_noninteger_returns_typed_error_without_mutation(self) -> None:
+        self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
+        _, before = self._run("task-show", "M-1001")
+        _, events_before = self._run("events")
+        for field, value in (("token_budget", "inf"), ("priority", "1.5")):
+            with self.subTest(field=field):
+                code, payload = self._run(
+                    "task-update", "M-1001", "--field", field, "--value", value
+                )
+                self.assertEqual(code, 2)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["kind"], "ValidationError")
+        _, after = self._run("task-show", "M-1001")
+        _, events_after = self._run("events")
+        self.assertEqual(after, before)
+        self.assertEqual(events_after, events_before)
+
+    def test_task_update_refuses_a_list_for_a_scalar_field(self) -> None:
+        self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
+        _, before = self._run("task-show", "M-1001")
+        _, events_before = self._run("events")
+        code, payload = self._run(
+            "task-update", "M-1001", "--field", "token_budget", "--list", "9000"
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["kind"], "ValidationError")
+        _, after = self._run("task-show", "M-1001")
+        _, events_after = self._run("events")
+        self.assertEqual(after, before)
+        self.assertEqual(events_after, events_before)
+
+    def test_task_update_accepts_repeatable_list_without_a_placeholder_value(self) -> None:
+        self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
+        code, payload = self._run(
+            "task-update", "M-1001", "--field", "tags", "--list", "security", "--list", "auth"
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["tags"], ["security", "auth"])
+
+    def test_task_update_requires_an_explicit_value(self) -> None:
+        self._run("task-add", "M-1001", "--objective", "o", "--acceptance", "a")
+        _, before = self._run("task-show", "M-1001")
+        _, events_before = self._run("events")
+        code, payload = self._run("task-update", "M-1001", "--field", "title")
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["kind"], "ValidationError")
+        _, after = self._run("task-show", "M-1001")
+        _, events_after = self._run("events")
+        self.assertEqual(after, before)
+        self.assertEqual(events_after, events_before)
 
     def test_handoff_schema_prints_the_published_contract(self) -> None:
         code, payload = self._run("handoff", "M-1001", "--schema")

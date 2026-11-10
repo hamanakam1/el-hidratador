@@ -164,6 +164,11 @@ hidratador schema --validate payload.json --against handoff
 The five published files are also kept in the repository under `schema/`, and a test asserts that
 the copies match the module.
 
+Validation exits with code `0` and `ok: true` only when the document passes. A schema mismatch
+returns `valid: false`, `ok: false`, the validation errors, and exit code `2`. Malformed JSON
+or non-UTF-8 input returns a typed validation error with exit code `2`. Validation never opens
+or creates a ledger.
+
 ---
 
 ## Ledger and audit
@@ -317,6 +322,16 @@ hidratador replay --all
 
 When the event log and the ticket table disagree, `consistent` is `false` and `divergences` names
 the difference. Replay never writes to the ledger.
+
+Replay reads the complete history for each task, including events beyond the first 500 global
+events, and compares history, checkpoints, and recorded state within one read snapshot. Expired
+leases remain as recorded; use an explicit `reconcile` operation to update them. `replay --all`
+uses one snapshot for the whole report, even if another writer commits during the read.
+
+The CLI opens the ledger read-only. A missing database or a schema that requires migration is a
+typed refusal with exit code `2`; replay never creates or migrates a database. Use an explicit
+`init` operation when initialization or migration is intended.
+If the ledger was written by a newer schema version, use compatible software instead.
 
 ### `failures`
 
@@ -483,12 +498,22 @@ hidratador task-update M-1001 --field tags --value security,auth
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `title`, `objective`, `acceptance`, `owner`, `description`, `seed_key` | text | |
-| `token_budget`, `priority` | integer | `priority` is 1 (P0) to 3 (P3) |
+| `title`, `objective`, `acceptance`, `owner`, `description` | text | `objective` and `acceptance` must not be blank |
+| `kind` | text | `code`, `fix`, `closure`, `planning`, or `product` |
+| `token_budget`, `priority` | integer | Budget must be positive; `priority` is 1 (P0) to 3 (P3) |
 | `scope`, `tags`, `depends_on`, `blocks`, `acceptance_criteria` | list | Comma separated, or repeat `--list` |
 
 Lifecycle fields are not settable here: `status` is refused, because a station changes through
 `start`, `checkpoint`, `fail`, `finish`, and `decide`.
+The creation identity `seed_key` is also not settable. Scope must contain at least one nonblank
+resource key. Invalid types, values, and empty scope updates are refused with exit code `2`,
+without changing the ticket, its update timestamp, or the event log.
+
+Scope keys cannot be added or removed while a ticket is `IN_PROGRESS`, `BLOCKED`, or `REVIEW`.
+These states hold a resource reservation. A refused scope update leaves every field in that
+update and the event log unchanged. Reordering the same keys and updating unrelated fields are
+allowed. Change the resource set before starting or after an explicit operator decision releases
+the reservation.
 
 ### `triage`
 
