@@ -247,6 +247,9 @@ def build_parser() -> argparse.ArgumentParser:
     export = sub.add_parser("export", help="export tickets to a file-backed store")
     export.add_argument("--dir", default=".hidratador")
 
+    gh_status = sub.add_parser("github-status", help="report the state of the GitHub adapter")
+    gh_status.add_argument("--repo", default=None, help="limit the report to one repository")
+
     gh_poll = sub.add_parser("github-poll", help="observe a repository (read only)")
     gh_poll.add_argument("--repo", required=True)
     gh_poll.add_argument("--apply", action="store_true", help="persist the observations")
@@ -676,6 +679,14 @@ def _cmd_export(args: argparse.Namespace, ledger: Ledger) -> dict[str, Any]:
     return store.export_all(ledger.tasks())
 
 
+def _cmd_github_status(args: argparse.Namespace, ledger: Ledger | None) -> dict[str, Any]:
+    sync = GitHubSync()
+    try:
+        return sync.status(args.repo)
+    finally:
+        sync.close()
+
+
 def _cmd_github_poll(args: argparse.Namespace, ledger: Ledger | None) -> dict[str, Any]:
     sync = GitHubSync()
     try:
@@ -735,6 +746,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace, Any], dict[str, Any]]] = {
 #: Handlers that run without opening a ledger.
 _NO_LEDGER_HANDLERS: dict[str, Callable[[argparse.Namespace, Any], dict[str, Any]]] = {
     "schema": _cmd_schema,
+    "github-status": _cmd_github_status,
     "topology": _cmd_topology,
     "github-poll": _cmd_github_poll,
     "github-publish": _cmd_github_publish,

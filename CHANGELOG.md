@@ -45,6 +45,8 @@ repository into a place where a newcomer can start without asking anyone.
   directory and narrates it, so a newcomer can watch the whole system work before touching their
   own state.
 - `hidratador topology` reports the machine the process runs on.
+- `hidratador github-status [--repo owner/name]` reports the observation count, the recommended
+  actions, and the outbox counts by state. It is read-only and opens no ledger.
 
 ### The contract layer: `el_hidratador/schema.py`
 
