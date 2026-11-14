@@ -1,3 +1,5 @@
+> **Español:** Una traducción de esta página está disponible en [faq.es.md](faq.es.md).
+
 # FAQ
 
 Eighteen questions that come up often, answered from the code rather than from a slogan.
